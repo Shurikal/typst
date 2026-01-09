@@ -6,7 +6,7 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, Resolve, Smart, StyleChain};
 use typst_library::introspection::Locator;
 use typst_library::layout::{
-    Abs, Axes, Corner, Corners, Frame, FrameItem, Point, Ratio, Region, Rel, Sides, Size,
+    Abs, Angle, Axes, Corner, Corners, Frame, FrameItem, Point, Ratio, Region, Rel, Sides, Size
 };
 use typst_library::visualize::{
     CircleElem, CloseMode, Curve, CurveComponent, CurveElem, EllipseElem, FillRule,
@@ -441,20 +441,117 @@ pub fn layout_circle(
     styles: StyleChain,
     region: Region,
 ) -> SourceResult<Frame> {
-    layout_shape(
-        engine,
-        locator,
-        styles,
-        region,
-        ShapeKind::Circle,
-        elem.body.get_ref(styles),
-        elem.fill.get_cloned(styles),
-        elem.stroke.resolve(styles).map(|s| Sides::splat(Some(s))),
-        elem.inset.resolve(styles),
-        elem.outset.resolve(styles),
-        Corners::splat(None),
-        elem.span(),
-    )
+    // Determine whether we draw a full circle or just an arc.
+    let start_angle = elem.start_angle.get(styles) - Angle::deg(90.0);
+    let sweep_angle = elem.sweep_angle.get(styles);
+    let sweep_deg = sweep_angle.to_deg().clamp(0.0, 360.0);
+
+    // Full circle path – reuse generic shape path.
+    if sweep_deg >= 359.999 { // treat as full circle
+        return layout_shape(
+            engine,
+            locator,
+            styles,
+            region,
+            ShapeKind::Circle,
+            elem.body.get_ref(styles),
+            elem.fill.get_cloned(styles),
+            elem.stroke.resolve(styles).map(|s| Sides::splat(Some(s))),
+            elem.inset.resolve(styles),
+            elem.outset.resolve(styles),
+            Corners::splat(None),
+            elem.span(),
+        );
+    }
+
+    // Compute the square frame size (with body/inset handling) exactly like a full
+    // circle would, so partial slices don’t shift layout. This mirrors the
+    // quadratic branch of layout_shape.
+    let mut frame = if let Some(child) = elem.body.get_ref(styles) {
+        // If there's body content, we measure it similarly to quadratic_size logic.
+        let mut pod = region;
+        // Inset adjustments (same as layout_shape quadratic round case).
+        let mut inset = elem.inset.resolve(styles).unwrap_or_default();
+        // extra inset for round shapes
+        inset = inset.map(|v| v + Ratio::new(0.5 - SQRT_2 / 4.0));
+        let has_inset = !inset.is_zero();
+        if has_inset { pod.size = crate::pad::shrink(region.size, &inset); }
+        let length = match quadratic_size(pod) {
+            Some(l) => l,
+            None => crate::layout_frame(engine, child, locator.relayout(), styles, pod)?
+                .size()
+                .max_by_side()
+                .min(pod.size.min_by_side()),
+        };
+        pod = Region::new(Size::splat(length), Axes::splat(true));
+        let mut child_frame = crate::layout_frame(engine, child, locator, styles, pod)?;
+        if has_inset { crate::pad::grow(&mut child_frame, &inset); }
+        child_frame
+    } else {
+        // Default size logic.
+        let default = Size::new(Abs::pt(45.0), Abs::pt(30.0)).min(region.size);
+        let length = match quadratic_size(region) {
+            Some(l) => l,
+            None => default.min_by_side(),
+        };
+        Frame::soft(Size::splat(length))
+    };
+
+    // Prepare fill & stroke for the pie slice.
+    let fill = elem.fill.get_cloned(styles);
+    let stroke = match elem.stroke.resolve(styles) {
+        Smart::Auto if fill.is_none() => Some(FixedStroke::default()),
+        Smart::Auto => None,
+        Smart::Custom(s) => s.map(Stroke::unwrap_or_default),
+    };
+
+    // Build pie slice using arc helpers (split into <=90° segments for accuracy).
+    let size = frame.size();
+    let radius = size.x.min(size.y) / 2.0; // enforce circle by min side
+    let center = Point::new(radius, radius);
+    let start_rad = start_angle.to_rad();
+    let sweep_rad = sweep_deg.to_radians();
+
+    let mut curve = Curve::new();
+    if sweep_rad > 0.0 {
+        let max_seg = std::f64::consts::FRAC_PI_2; // 90°
+        let segments = (sweep_rad / max_seg).ceil() as i32;
+        let seg_angle = sweep_rad / segments as f64;
+        curve.move_(center);
+        let mut prev_end = Point::zero();
+        for i in 0..segments {
+            let seg_start = start_rad + i as f64 * seg_angle;
+            let seg_end = if i == segments - 1 { start_rad + sweep_rad } else { seg_start + seg_angle };
+            let start_p = Point::new(
+                center.x + radius * seg_start.cos(),
+                center.y + radius * seg_start.sin(),
+            );
+            let end_p = Point::new(
+                center.x + radius * seg_end.cos(),
+                center.y + radius * seg_end.sin(),
+            );
+            if i == 0 {
+                // radial line out then first arc
+                curve.line(start_p);
+                curve.arc(start_p, center, end_p);
+            } else {
+                curve.arc(prev_end, center, end_p);
+            }
+            prev_end = end_p;
+        }
+        // Close back via radial line from last arc end to center.
+        curve.line(center);
+        curve.close();
+    }
+
+    let shape = Shape {
+        geometry: Geometry::Curve(curve),
+        fill,
+        fill_rule: FillRule::default(),
+        stroke,
+    };
+    frame.prepend(Point::zero(), FrameItem::Shape(shape, elem.span()));
+    Ok(frame)
 }
 
 /// A category of shape.

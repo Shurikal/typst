@@ -321,6 +321,34 @@ pub struct CircleElem {
     /// the [box's documentation]($box.outset) for more details.
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
+    /// The angle (from the positive x-axis, going counter-clockwise) at which
+    /// the visible segment of the circle starts.
+    ///
+    /// This only has an effect together with `sweep-angle` if the sweep is
+    /// less than a full turn. Defaults to `{0deg}`.
+    ///
+    /// ```example
+    /// #circle(radius: 30pt, stroke: 2pt + blue, start-angle: 90deg, sweep-angle: 120deg)
+    /// ```
+    #[default(crate::layout::Angle::deg(0.0))]
+    pub start_angle: crate::layout::Angle,
+
+    /// The angular length of the visible segment, measured positive
+    /// counter-clockwise from `start-angle`.
+    ///
+    /// Defaults to `{360deg}` for a full circle. If set to less than a full
+    /// turn, the circle becomes a pie slice (radially connected back to the
+    /// center) that can be filled. Values greater than `{360deg}` are
+    /// clamped. A sweep of `{0deg}` produces an empty shape.
+    ///
+    /// ```example
+    /// // Half circle slice with fill
+    /// #circle(radius: 25pt, fill: yellow, stroke: (paint: red, thickness: 3pt), sweep-angle: 180deg)
+    /// // Offset slice
+    /// #circle(radius: 25pt, fill: green, stroke: 1pt + black, start-angle: 90deg, sweep-angle: 120deg)
+    /// ```
+    #[default(crate::layout::Angle::deg(360.0))]
+    pub sweep_angle: crate::layout::Angle,
 
     /// The content to place into the circle. The circle expands to fit this
     /// content, keeping the 1-1 aspect ratio.
